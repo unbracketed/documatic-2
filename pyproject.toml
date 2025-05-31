@@ -9,6 +9,9 @@ dependencies = [
     "lancedb",
     "click",
     "httpx",
+    "GitPython",
+    "python-frontmatter",
+    "pathlib",
 ]
 
 [project.optional-dependencies]
