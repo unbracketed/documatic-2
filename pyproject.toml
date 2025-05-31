@@ -12,6 +12,8 @@ dependencies = [
     "GitPython",
     "python-frontmatter",
     "pathlib",
+    "pyarrow",
+    "openai",
 ]
 
 [project.optional-dependencies]
