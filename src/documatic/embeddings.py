@@ -21,6 +21,11 @@ from pydantic_ai.models.openai import OpenAIModel
 from .chunking import DocumentChunk
 
 
+class RateLimitError(Exception):
+    """Exception raised when API rate limits are exceeded."""
+    pass
+
+
 class EmbeddingConfig(BaseModel):
     """Configuration for embedding generation and vector storage."""
 
@@ -95,32 +100,34 @@ class EmbeddingPipeline:
 
     def _ensure_table_exists(self) -> None:
         """Ensure the vector table exists with proper schema."""
-        schema = pa.schema([
-            pa.field("chunk_id", pa.string()),
-            pa.field("source_file", pa.string()),
-            pa.field("title", pa.string()),
-            pa.field("section_hierarchy", pa.list_(pa.string())),
-            pa.field("chunk_index", pa.int64()),
-            pa.field("content", pa.string()),
-            pa.field("content_type", pa.string()),
-            pa.field("document_type", pa.string()),
-            pa.field("token_count", pa.int64()),
-            pa.field("word_count", pa.int64()),
-            pa.field("overlap_previous", pa.bool_()),
-            pa.field("frontmatter", pa.string()),  # JSON string
-            pa.field("embedding_hash", pa.string()),
-            pa.field("created_at", pa.float64()),
-            pa.field("updated_at", pa.float64()),
-            pa.field("vector", pa.list_(pa.float32(), list_size=self.config.dimension)),
-        ])
 
         # Check if table exists
         try:
             self.table = self.db.open_table(self.table_name)
             print(f"Connected to existing table '{self.table_name}'")
-        except FileNotFoundError:
+        except (FileNotFoundError, ValueError):
             # Create empty table with schema
-            empty_data = pa.table([], schema=schema)
+            empty_arrays = {
+                "chunk_id": pa.array([], type=pa.string()),
+                "source_file": pa.array([], type=pa.string()),
+                "title": pa.array([], type=pa.string()),
+                "section_hierarchy": pa.array([], type=pa.list_(pa.string())),
+                "chunk_index": pa.array([], type=pa.int64()),
+                "content": pa.array([], type=pa.string()),
+                "content_type": pa.array([], type=pa.string()),
+                "document_type": pa.array([], type=pa.string()),
+                "token_count": pa.array([], type=pa.int64()),
+                "word_count": pa.array([], type=pa.int64()),
+                "overlap_previous": pa.array([], type=pa.bool_()),
+                "frontmatter": pa.array([], type=pa.string()),
+                "embedding_hash": pa.array([], type=pa.string()),
+                "created_at": pa.array([], type=pa.float64()),
+                "updated_at": pa.array([], type=pa.float64()),
+                "vector": pa.array(
+                    [], type=pa.list_(pa.float32(), list_size=self.config.dimension)
+                ),
+            }
+            empty_data = pa.table(empty_arrays)
             self.table = self.db.create_table(self.table_name, empty_data)
             print(f"Created new table '{self.table_name}'")
 
@@ -153,8 +160,8 @@ class EmbeddingPipeline:
                 f"({len(batch_chunks)} chunks)"
             )
 
-            # Generate embeddings for batch
-            embeddings = await self._generate_embeddings_batch(
+            # Generate embeddings for batch with retry logic
+            embeddings = await self._embed_batch_with_retry(
                 [chunk.content for chunk in batch_chunks]
             )
 
@@ -183,7 +190,7 @@ class EmbeddingPipeline:
 
         return vector_docs
 
-    async def _generate_embeddings_batch(self, texts: list[str]) -> list[list[float]]:
+    async def _embed_batch_with_retry(self, texts: list[str]) -> list[list[float]]:
         """Generate embeddings for a batch of texts with retry logic.
 
         Args:
@@ -194,25 +201,8 @@ class EmbeddingPipeline:
         """
         for attempt in range(self.config.max_retries):
             try:
-                # Call OpenAI embeddings API
-                embeddings = []
-
-                for _text in texts:
-                    # Use pydantic-ai agent to get embeddings
-                    # Note: This is a simplified approach. In practice,
-                    # you might want to use the OpenAI client directly for embeddings
-                    # For now, create a mock embedding
-                    # In practice, use openai.embeddings.create()
-                    # result = await self.agent.run(
-                    #     f"Generate embedding for: {text[:100]}...",
-                    #     message_history=[]
-                    # )
-                    mock_embedding = [0.1] * self.config.dimension
-                    embeddings.append(mock_embedding)
-
-                return embeddings
-
-            except Exception as e:
+                return await self._generate_embeddings_batch(texts)
+            except (RateLimitError, Exception) as e:
                 if attempt == self.config.max_retries - 1:
                     raise RuntimeError(
                         f"Failed to generate embeddings after "
@@ -227,6 +217,33 @@ class EmbeddingPipeline:
                 await asyncio.sleep(delay)
 
         return []  # Should never reach here
+
+    async def _generate_embeddings_batch(self, texts: list[str]) -> list[list[float]]:
+        """Generate embeddings for a batch of texts.
+
+        Args:
+            texts: List of texts to embed
+
+        Returns:
+            List of embedding vectors
+        """
+        # Call OpenAI embeddings API
+        embeddings = []
+
+        for _text in texts:
+            # Use pydantic-ai agent to get embeddings
+            # Note: This is a simplified approach. In practice,
+            # you might want to use the OpenAI client directly for embeddings
+            # For now, create a mock embedding
+            # In practice, use openai.embeddings.create()
+            # result = await self.agent.run(
+            #     f"Generate embedding for: {text[:100]}...",
+            #     message_history=[]
+            # )
+            mock_embedding = [0.1] * self.config.dimension
+            embeddings.append(mock_embedding)
+
+        return embeddings
 
     def _compute_content_hash(self, content: str) -> str:
         """Compute hash of content for change detection.
@@ -277,8 +294,16 @@ class EmbeddingPipeline:
             }
             data.append(row)
 
-        # Create PyArrow table
-        table_data = pa.table(data)
+        # Convert list of dicts to PyArrow table
+        if data:
+            # Convert to column-oriented format
+            columns = {}
+            for key in data[0]:
+                columns[key] = [row[key] for row in data]
+            table_data = pa.table(columns)
+        else:
+            # Empty table
+            table_data = pa.table({})
 
         # Upsert data (merge based on chunk_id)
         try:

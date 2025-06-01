@@ -1,0 +1,25 @@
+```bash
+# Install AppPack CLI
+curl -fsSL https://install.apppack.io | sh
+
+# Create a new app
+apppack create my-app
+
+# Deploy the application
+apppack deploy --env production
+```
+
+```python
+# apppack.toml configuration file
+[app]
+name = "my-django-app"
+build = "dockerfile"
+
+[env]
+DATABASE_URL = "${DATABASE_URL}"
+SECRET_KEY = "${SECRET_KEY}"
+
+[processes]
+web = "python manage.py runserver"
+worker = "celery worker"
+```
