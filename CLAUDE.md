@@ -30,6 +30,31 @@ uv pip install -e .[dev]
 uv run python -c "from src.documatic.acquisition import acquire_apppack_docs; result = acquire_apppack_docs(); print('Success:', result['status'])"
 ```
 
+### CLI Usage
+```bash
+# Set up API key (required for indexing, search, and chat)
+export OPENAI_API_KEY="your-openai-api-key"
+
+# Fetch AppPack documentation
+uv run documatic fetch
+
+# Index documents (chunk and embed into vector database)
+uv run documatic index
+
+# Search documents
+uv run documatic search "deploy flask app"
+uv run documatic search "deploy flask app" --method vector --limit 10
+
+# Interactive chat session
+uv run documatic chat
+
+# Run quality evaluation (placeholder - will be implemented in task 08)
+uv run documatic evaluate
+
+# Use custom data directory
+uv run documatic --data-dir /path/to/data fetch
+```
+
 ### Testing
 ```bash
 # Run all tests
