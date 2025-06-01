@@ -256,3 +256,36 @@ class MockNetworkConditions:
         # Simulate timeouts
         if random.random() < self.timeout_rate:
             raise TimeoutError("Network timeout")
+
+
+class MockEmbeddingModel:
+    """Mock embedding model for testing."""
+
+    def __init__(self, dimension: int = 1536):
+        self.dimension = dimension
+        self.call_count = 0
+
+    def embed_text(self, text: str) -> list[float]:
+        """Generate mock embedding for text.
+        
+        Args:
+            text: Text to embed
+            
+        Returns:
+            Mock embedding vector
+        """
+        self.call_count += 1
+        # Create deterministic embedding based on text hash
+        seed = int(hashlib.md5(text.encode()).hexdigest(), 16)
+        return [(seed * i) % 1000 / 1000 for i in range(self.dimension)]
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        """Generate mock embeddings for multiple texts.
+        
+        Args:
+            texts: List of texts to embed
+            
+        Returns:
+            List of mock embedding vectors
+        """
+        return [self.embed_text(text) for text in texts]
