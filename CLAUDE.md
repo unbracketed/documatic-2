@@ -35,11 +35,42 @@ uv run python -c "from src.documatic.acquisition import acquire_apppack_docs; re
 # Run all tests
 uv run pytest
 
-# Run specific test file
-uv run pytest tests/test_<module>.py
+# Run tests with verbose output
+uv run pytest -v
 
-# Run with coverage
+# Run specific test categories
+uv run pytest tests/unit/          # Unit tests only
+uv run pytest tests/integration/   # Integration tests only
+
+# Run specific test files
+uv run pytest tests/unit/test_embedding_model.py
+uv run pytest tests/unit/test_batch_processing.py
+uv run pytest tests/unit/test_lancedb_schema.py
+uv run pytest tests/unit/test_vector_storage.py
+uv run pytest tests/integration/test_embedding_pipeline_integration.py
+uv run pytest tests/integration/test_embedding_performance.py
+
+# Run specific test classes or methods
+uv run pytest tests/unit/test_embedding_model.py::TestEmbeddingGeneration
+uv run pytest tests/unit/test_embedding_model.py::TestEmbeddingGeneration::test_single_text_embedding
+
+# Run tests with coverage
 uv run pytest --cov=documatic
+
+# Run tests with coverage report
+uv run pytest --cov=documatic --cov-report=html
+uv run pytest --cov=documatic --cov-report=term-missing
+
+# Run tests that match a pattern
+uv run pytest -k "embedding"      # Run tests with 'embedding' in name
+uv run pytest -k "batch"          # Run tests with 'batch' in name
+uv run pytest -k "performance"    # Run performance tests
+
+# Run tests and stop on first failure
+uv run pytest -x
+
+# Run tests in parallel (if pytest-xdist is installed)
+uv run pytest -n auto
 ```
 
 ### Linting and Type Checking
@@ -60,8 +91,8 @@ uv run mypy src/documatic/
 The application follows a 10-stage pipeline architecture with task-driven development. Each stage is defined in `_tasks/` with technical requirements and test specifications:
 
 1. ✅ **Document Acquisition** (`src/documatic/acquisition.py`)
-2. **Document Chunking** - Planned
-3. **Embedding Pipeline** - Planned  
+2. ✅ **Document Chunking** (`src/documatic/chunking.py`)
+3. ✅ **Embedding Pipeline** (`src/documatic/embeddings.py`)
 4. **Search Layer** - Planned
 5. **RAG Chat Interface** - Planned
 6. **CLI Application** - Planned
@@ -75,7 +106,8 @@ data/
 ├── raw/
 │   ├── apppack-docs/           # Git clone of source documentation
 │   └── manifest.json           # Acquisition metadata and document tracking
-└── (future: processed/, embeddings/, etc.)
+├── embeddings/                 # LanceDB vector database (auto-created)
+└── (future: processed/, etc.)
 ```
 
 ### Key Patterns
@@ -86,9 +118,22 @@ data/
 - Frontmatter extraction preserving document structure
 - Class-based modular design with proper error handling
 
+**Document Chunking Pattern:**
+- Markdown-aware chunking preserving semantic structure
+- Configurable chunk sizes with intelligent overlap
+- Content type detection (text, code, lists, tables)
+- Position tracking and hierarchy preservation
+
+**Embedding Pipeline Pattern:**
+- OpenAI text-embedding-3-small model integration
+- Batch processing with retry logic and rate limiting
+- LanceDB vector storage with hybrid search capabilities
+- Metadata preservation through the embedding process
+- Change detection via content hashing
+
 **Metadata Preservation:**
 - YAML frontmatter extraction from markdown files
-- Document hierarchy tracking (title, section, subsection)
+- Document hierarchy tracking (title, section, subsection)  
 - Source URL and document type metadata
 - Change detection via file hashing
 
@@ -134,17 +179,57 @@ def process_documents(docs: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
 
 ## Current Implementation Status
 
-The project currently has **Document Acquisition** fully implemented:
+The project has **Document Acquisition**, **Chunking**, and **Embedding Pipeline** fully implemented:
+
+### Document Acquisition ✅
 - `DocumentAcquisition` class handles clone/pull operations
-- Processes 32+ AppPack documentation files
+- Processes 32+ AppPack documentation files  
 - Manifest-based change tracking
 - Frontmatter metadata extraction
 - Incremental update support
 
+### Document Chunking ✅
+- `ChunkingStrategy` with markdown-aware processing
+- Configurable chunk sizes (512-1024 tokens default)
+- Content type detection and semantic preservation
+- Hierarchical section tracking
+- Intelligent overlap handling (15% default)
+
+### Embedding Pipeline ✅
+- `EmbeddingPipeline` with OpenAI integration
+- Batch processing (50 chunks default) with retry logic
+- LanceDB vector storage with full-text search indexing
+- Hybrid search capabilities (vector + full-text)
+- Change detection and incremental updates
+- Comprehensive test suite with 50+ test cases
+
 **Key Files:**
-- `src/documatic/acquisition.py` - Main acquisition logic
+- `src/documatic/acquisition.py` - Document acquisition logic
+- `src/documatic/chunking.py` - Document chunking logic  
+- `src/documatic/embeddings.py` - Embedding and vector storage
+- `tests/` - Comprehensive test suite (unit + integration)
 - `_tasks/` - Technical specifications for each pipeline stage
 - `data/raw/manifest.json` - Current acquisition state
+
+## Test Infrastructure
+
+The project includes a comprehensive test suite covering:
+
+### Unit Tests (`tests/unit/`)
+- **Embedding Model Tests** (21 tests) - Model initialization, configuration, embedding generation
+- **Batch Processing Tests** (12 tests) - Batch sizing, retry logic, error recovery
+- **LanceDB Schema Tests** (15 tests) - Schema creation, validation, migration
+- **Vector Storage Tests** - Insertion, upsert, indexing, search operations
+
+### Integration Tests (`tests/integration/`)
+- **End-to-End Pipeline Tests** - Full document processing workflows
+- **Performance Tests** - Throughput, latency, and scalability validation
+
+### Test Features
+- **Mock Infrastructure** - Complete mocking of external dependencies
+- **Deterministic Testing** - Consistent, reproducible results
+- **Performance Benchmarking** - Automated performance measurement
+- **Edge Case Coverage** - Unicode, empty content, large text handling
 
 ## AppPack Documentation Sources
 
