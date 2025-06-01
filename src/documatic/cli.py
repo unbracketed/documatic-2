@@ -48,6 +48,7 @@ def setup_logging(verbose: bool) -> None:
     default="data",
     help="Data directory for storage (default: data)",
 )
+@click.version_option(version="0.1.0", prog_name="documatic")
 @click.pass_context
 def cli(ctx: click.Context, config: Path | None, verbose: bool, data_dir: Path) -> None:
     """Documatic - RAG application for AppPack.io documentation.
@@ -94,9 +95,8 @@ def fetch(ctx: click.Context, repo_url: str, force: bool) -> None:
             bar.update(100)
 
         if result["status"] == "success":
-            click.echo(f"✅ Successfully processed {result['files_processed']} files")
-            if result.get("updated_files"):
-                click.echo(f"📝 Updated {len(result['updated_files'])} files")
+            click.echo(f"✅ Successfully processed {result['documents_count']} files")
+            click.echo(f"📄 Manifest saved to {result['manifest_path']}")
         else:
             click.echo(f"❌ Error: {result.get('error', 'Unknown error')}")
             sys.exit(1)
