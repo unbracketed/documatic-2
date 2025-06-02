@@ -14,6 +14,12 @@ import click
 from .acquisition import DocumentAcquisition
 from .chat import ChatConfig, RAGChatInterface
 from .embeddings import EmbeddingPipeline
+from .evaluation import (
+    EvaluationConfig,
+    generate_evaluation_dataset,
+    run_quality_evaluation,
+    save_evaluation_report,
+)
 from .search import SearchLayer
 
 
@@ -276,11 +282,10 @@ def chat(ctx: click.Context, model: str, context_window: int) -> None:
                 # Stream the response
                 import asyncio
                 response_text = ""
-                captured_input = user_input  # Capture to avoid closure issues
 
                 async def stream_response() -> None:
                     nonlocal response_text
-                    async for chunk in chat_interface.chat_stream(captured_input):
+                    async for chunk in chat_interface.chat_stream(user_input):
                         click.echo(chunk, nl=False)
                         response_text += chunk
 
@@ -309,22 +314,145 @@ def chat(ctx: click.Context, model: str, context_window: int) -> None:
     help="Output file for evaluation results",
 )
 @click.option(
-    "--sample-size",
+    "--questions-per-doc",
+    default=3,
+    help="Number of questions to generate per document (default: 3)",
+)
+@click.option(
+    "--max-documents",
     default=10,
-    help="Number of test queries to evaluate (default: 10)",
+    help="Maximum documents to sample for evaluation (default: 10)",
+)
+@click.option(
+    "--pass-threshold",
+    default=0.7,
+    help="Minimum score threshold to pass evaluation (default: 0.7)",
+)
+@click.option(
+    "--model",
+    default="gpt-4o-mini",
+    help="Model to use for evaluation (default: gpt-4o-mini)",
 )
 @click.pass_context
-def evaluate(ctx: click.Context, output: Path | None, sample_size: int) -> None:
+def evaluate(
+    ctx: click.Context,
+    output: Path | None,
+    questions_per_doc: int,
+    max_documents: int,
+    pass_threshold: float,
+    model: str,
+) -> None:
     """Run quality evaluation checks on the system."""
+    data_dir = ctx.obj["data_dir"]
+
+    # Check for required API key
+    if not os.getenv("OPENAI_API_KEY"):
+        click.echo("❌ Error: OPENAI_API_KEY environment variable is required")
+        sys.exit(1)
+
     click.echo("🔬 Running quality evaluation...")
 
-    # Placeholder implementation - this would be implemented in task 08
-    click.echo("⚠️  Evaluation system not yet implemented")
-    click.echo("This command will be available after completing "
-              "task 08_quality_evaluation")
+    try:
+        # Initialize components
+        embedding_pipeline = EmbeddingPipeline(db_path=data_dir / "embeddings")
+        search_layer = SearchLayer(embedding_pipeline)
+        chat_config = ChatConfig(model_name=model)
+        chat_interface = RAGChatInterface(search_layer, chat_config)
 
-    if output:
-        click.echo(f"Results would be saved to: {output}")
+        # Create evaluation configuration
+        eval_config = EvaluationConfig(
+            pass_threshold=pass_threshold,
+            evaluation_model=model
+        )
+
+        import asyncio
+
+        async def run_evaluation() -> None:
+            # Generate evaluation dataset
+            click.echo(
+                f"📚 Generating evaluation dataset from {max_documents} documents..."
+            )
+            with click.progressbar(
+                length=100, label="Generating questions", show_percent=True
+            ) as bar:
+                dataset = await generate_evaluation_dataset(
+                    search_layer,
+                    questions_per_doc=questions_per_doc,
+                    max_documents=max_documents
+                )
+                bar.update(100)
+
+            if not dataset.questions:
+                click.echo("❌ No questions generated. Check your document corpus.")
+                return
+
+            click.echo(f"✅ Generated {len(dataset.questions)} evaluation questions")
+
+            # Run evaluation
+            click.echo("🔍 Running evaluation on generated questions...")
+            with click.progressbar(
+                length=len(dataset.questions),
+                label="Evaluating questions",
+                show_percent=True
+            ) as bar:
+                report = await run_quality_evaluation(
+                    chat_interface, dataset, eval_config
+                )
+                bar.update(len(dataset.questions))
+
+            # Display results
+            click.echo("\n📊 Evaluation Results:")
+            click.echo(f"   Total Questions: {report.total_questions}")
+            click.echo(f"   Passed: {report.passed_questions}")
+            click.echo(f"   Pass Rate: {report.pass_rate:.1%}")
+            click.echo(f"   Average Score: {report.avg_overall_score:.3f}")
+            click.echo(f"   Retrieval Precision: {report.avg_retrieval_precision:.3f}")
+            click.echo(f"   Answer Relevance: {report.avg_answer_relevance:.3f}")
+            click.echo(f"   Citation Accuracy: {report.avg_citation_accuracy:.3f}")
+
+            # Show breakdown by question type
+            if report.results_by_type:
+                click.echo("\n📈 Results by Question Type:")
+                for q_type, metrics in report.results_by_type.items():
+                    click.echo(
+                        f"   {q_type.title()}: {metrics['pass_rate']:.1%} pass rate"
+                    )
+
+            # Show breakdown by difficulty
+            if report.results_by_difficulty:
+                click.echo("\n🎯 Results by Difficulty:")
+                for difficulty, metrics in report.results_by_difficulty.items():
+                    click.echo(
+                        f"   {difficulty.title()}: {metrics['pass_rate']:.1%} pass rate"
+                    )
+
+            # Save report if output specified
+            if output:
+                save_evaluation_report(report, output)
+                click.echo(f"💾 Report saved to: {output}")
+            else:
+                # Save to default location
+                default_output = data_dir / f"evaluation_report_{report.report_id}.json"
+                save_evaluation_report(report, default_output)
+                click.echo(f"💾 Report saved to: {default_output}")
+
+            # Show overall result
+            if report.pass_rate >= pass_threshold:
+                click.echo(
+                    f"✅ System PASSED evaluation (pass rate: {report.pass_rate:.1%})"
+                )
+            else:
+                click.echo(
+                    f"❌ System FAILED evaluation (pass rate: {report.pass_rate:.1%})"
+                )
+                sys.exit(1)
+
+        # Run the async evaluation
+        asyncio.run(run_evaluation())
+
+    except Exception as e:
+        click.echo(f"❌ Error during evaluation: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
