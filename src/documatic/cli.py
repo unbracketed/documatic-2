@@ -13,7 +13,8 @@ import click
 
 from .acquisition import DocumentAcquisition
 from .chat import ChatConfig, RAGChatInterface
-from .embeddings import EmbeddingPipeline
+from .chunking import chunk_documents_from_manifest
+from .embeddings import EmbeddingConfig, EmbeddingPipeline
 from .evaluation import (
     EvaluationConfig,
     generate_evaluation_dataset,
@@ -164,11 +165,41 @@ def index(
                 click.echo("❌ No manifest found. Run 'documatic fetch' first.")
                 sys.exit(1)
 
-            # For now, show that indexing would happen here
+            # Process documents from manifest
             click.echo("Processing documents from manifest...")
-            # TODO: Implement manifest-based chunk processing
-            result = {"status": "success", "chunks_processed": 0, "total_documents": 0}
+
+            # Generate chunks
+            chunks = chunk_documents_from_manifest(manifest_file)
+            bar.update(30)
+
+            if not chunks:
+                click.echo("❌ No chunks generated from manifest")
+                sys.exit(1)
+
+            # Create embedding pipeline and embed chunks
+            config = EmbeddingConfig(batch_size=batch_size)
+            pipeline = EmbeddingPipeline(config=config, db_path=data_dir / "embeddings")
+            bar.update(50)
+
+            # Generate embeddings (this is async, so we need to run it properly)
+            import asyncio
+            vector_docs = asyncio.run(pipeline.embed_chunks(chunks))
+            bar.update(80)
+
+            # Store in database
+            pipeline.upsert_documents(vector_docs)
+
+            # Create vector index
+            pipeline.create_vector_index()
             bar.update(100)
+
+            # Get final stats
+            stats = pipeline.get_document_stats()
+            result = {
+                "status": "success",
+                "chunks_processed": len(chunks),
+                "total_documents": stats.get("total_documents", 0)
+            }
 
         if result["status"] == "success":
             click.echo(f"✅ Successfully indexed {result['chunks_processed']} chunks")
