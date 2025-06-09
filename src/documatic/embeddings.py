@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import lancedb  # type: ignore[import-untyped]
+import openai
 import pyarrow as pa  # type: ignore[import-untyped]
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
@@ -90,11 +91,17 @@ class EmbeddingPipeline:
             try:
                 app_config = get_config()
                 api_key = app_config.get_openai_api_key()
-            except (ValueError, RuntimeError):
+            except (ValueError, RuntimeError) as e:
                 raise ValueError(
                     "OpenAI API key required. Set OPENAI_API_KEY environment variable "
                     "or configure it in the global config."
-                )
+                ) from e
+
+        # Store API key for OpenAI client
+        self.api_key = api_key
+
+        # Initialize OpenAI client
+        self.openai_client = openai.OpenAI(api_key=api_key)
 
         self.model = OpenAIModel(self.config.model_name)
         self.agent = Agent(self.model)
@@ -139,23 +146,20 @@ class EmbeddingPipeline:
             self.table = self.db.create_table(self.table_name, empty_data)
             print(f"Created new table '{self.table_name}'")
 
-            # Create full-text search index on content
-            try:
-                self.table.create_fts_index("content", replace=True)
-                print("Created full-text search index on content")
-            except Exception as e:
-                print(f"Note: Could not create FTS index: {e}")
+            # Note: Full-text index will be created after first document insertion
 
-    async def embed_chunks(self, chunks: list[DocumentChunk]) -> list[VectorDocument]:
+    async def embed_chunks(
+        self, chunks: list[DocumentChunk]
+    ) -> list[tuple[VectorDocument, list[float]]]:
         """Generate embeddings for document chunks.
 
         Args:
             chunks: List of document chunks to embed
 
         Returns:
-            List of vector documents with embeddings
+            List of tuples containing (vector document, embedding)
         """
-        vector_docs = []
+        vector_docs_with_embeddings = []
         current_time = time.time()
 
         # Process chunks in batches
@@ -173,8 +177,8 @@ class EmbeddingPipeline:
                 [chunk.content for chunk in batch_chunks]
             )
 
-            # Create vector documents
-            for chunk, _embedding in zip(batch_chunks, embeddings, strict=False):
+            # Create vector documents with their embeddings
+            for chunk, embedding in zip(batch_chunks, embeddings, strict=False):
                 embedding_hash = self._compute_content_hash(chunk.content)
 
                 vector_doc = VectorDocument(
@@ -194,9 +198,9 @@ class EmbeddingPipeline:
                     created_at=current_time,
                     updated_at=current_time
                 )
-                vector_docs.append(vector_doc)
+                vector_docs_with_embeddings.append((vector_doc, embedding))
 
-        return vector_docs
+        return vector_docs_with_embeddings
 
     async def _embed_batch_with_retry(self, texts: list[str]) -> list[list[float]]:
         """Generate embeddings for a batch of texts with retry logic.
@@ -235,23 +239,21 @@ class EmbeddingPipeline:
         Returns:
             List of embedding vectors
         """
-        # Call OpenAI embeddings API
-        embeddings = []
+        try:
+            # Call OpenAI embeddings API
+            response = self.openai_client.embeddings.create(
+                model=self.config.model_name,
+                input=texts
+            )
 
-        for _text in texts:
-            # Use pydantic-ai agent to get embeddings
-            # Note: This is a simplified approach. In practice,
-            # you might want to use the OpenAI client directly for embeddings
-            # For now, create a mock embedding
-            # In practice, use openai.embeddings.create()
-            # result = await self.agent.run(
-            #     f"Generate embedding for: {text[:100]}...",
-            #     message_history=[]
-            # )
-            mock_embedding = [0.1] * self.config.dimension
-            embeddings.append(mock_embedding)
+            # Extract embeddings from response
+            embeddings = [data.embedding for data in response.data]
+            return embeddings
 
-        return embeddings
+        except openai.RateLimitError as e:
+            raise RateLimitError(f"OpenAI rate limit exceeded: {e}") from e
+        except Exception as e:
+            raise RuntimeError(f"Failed to generate embeddings: {e}") from e
 
     def _compute_content_hash(self, content: str) -> str:
         """Compute hash of content for change detection.
@@ -264,24 +266,22 @@ class EmbeddingPipeline:
         """
         return hashlib.sha256(content.encode()).hexdigest()[:16]
 
-    def upsert_documents(self, vector_docs: list[VectorDocument]) -> None:
+    def upsert_documents(
+        self, vector_docs_with_embeddings: list[tuple[VectorDocument, list[float]]]
+    ) -> None:
         """Insert or update vector documents in the database.
 
         Args:
-            vector_docs: List of vector documents to upsert
+            vector_docs_with_embeddings: List of tuples (vector document, embedding)
         """
-        if not vector_docs:
+        if not vector_docs_with_embeddings:
             return
 
-        print(f"Upserting {len(vector_docs)} documents...")
+        print(f"Upserting {len(vector_docs_with_embeddings)} documents...")
 
         # Convert to PyArrow format
         data = []
-        for doc in vector_docs:
-            # Create mock embedding for now
-            # In practice, this would be the actual embedding vector
-            vector = [0.1] * self.config.dimension
-
+        for doc, embedding in vector_docs_with_embeddings:
             row = {
                 "chunk_id": doc.chunk_id,
                 "source_file": doc.source_file,
@@ -298,7 +298,7 @@ class EmbeddingPipeline:
                 "embedding_hash": doc.embedding_hash,
                 "created_at": doc.created_at,
                 "updated_at": doc.updated_at,
-                "vector": vector,
+                "vector": embedding,  # Use the actual embedding
             }
             data.append(row)
 
@@ -322,18 +322,27 @@ class EmbeddingPipeline:
                 .when_not_matched_insert_all()
                 .execute(table_data)
             )
-            print(f"Successfully upserted {len(vector_docs)} documents")
+            print(f"Successfully upserted {len(vector_docs_with_embeddings)} documents")
 
         except Exception as e:
             # Fallback to simple add (for new tables)
             try:
                 self.table.add(table_data)
-                print(f"Successfully added {len(vector_docs)} documents")
+                doc_count = len(vector_docs_with_embeddings)
+                print(f"Successfully added {doc_count} documents")
             except Exception as add_error:
                 raise RuntimeError(
                     f"Failed to upsert documents: {e}, "
                     f"add fallback also failed: {add_error}"
                 ) from add_error
+
+    def create_full_text_index(self) -> None:
+        """Create full-text search index on content field."""
+        try:
+            self.table.create_fts_index("content", replace=True)
+            print("Created full-text search index on content")
+        except Exception as e:
+            print(f"Note: Could not create FTS index: {e}")
 
     def create_vector_index(self, index_type: str = "IVF_PQ") -> None:
         """Create vector index for efficient similarity search.
@@ -401,16 +410,24 @@ class EmbeddingPipeline:
         Returns:
             List of similar documents with scores
         """
-        # Generate embedding for query (mock for now)
-        query_vector = [0.1] * self.config.dimension
+        try:
+            # Generate embedding for query using OpenAI
+            response = self.openai_client.embeddings.create(
+                model=self.config.model_name,
+                input=[query_text]
+            )
+            query_vector = response.data[0].embedding
 
-        # Perform vector search
-        results = self.table.search(query_vector).limit(limit)
+            # Perform vector search
+            results = self.table.search(query_vector).limit(limit)
 
-        if filter_expr:
-            results = results.where(filter_expr)
+            if filter_expr:
+                results = results.where(filter_expr)
 
-        return list(results.to_pandas().to_dict("records"))
+            return list(results.to_pandas().to_dict("records"))
+        except Exception as e:
+            print(f"Vector search error: {e}")
+            return []
 
     def search_fulltext(
         self,
@@ -497,10 +514,13 @@ async def embed_documents_from_chunks(
     pipeline = EmbeddingPipeline(config, db_path)
 
     # Generate embeddings
-    vector_docs = await pipeline.embed_chunks(chunks)
+    vector_docs_with_embeddings = await pipeline.embed_chunks(chunks)
 
     # Store in database
-    pipeline.upsert_documents(vector_docs)
+    pipeline.upsert_documents(vector_docs_with_embeddings)
+
+    # Create full-text index after documents are inserted
+    pipeline.create_full_text_index()
 
     # Create vector index
     pipeline.create_vector_index()
