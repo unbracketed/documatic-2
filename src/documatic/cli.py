@@ -5,7 +5,6 @@ indexing, search, and chat functionality.
 """
 
 import logging
-import os
 import sys
 from pathlib import Path
 
@@ -14,6 +13,7 @@ import click
 from .acquisition import DocumentAcquisition
 from .chat import ChatConfig, RAGChatInterface
 from .chunking import chunk_documents_from_manifest
+from .config import DocumenticConfig, set_config
 from .embeddings import EmbeddingConfig, EmbeddingPipeline
 from .evaluation import (
     EvaluationConfig,
@@ -62,13 +62,29 @@ def cli(ctx: click.Context, config: Path | None, verbose: bool, data_dir: Path) 
 
     Provides commands to fetch, index, search, and chat with AppPack documentation.
     """
-    setup_logging(verbose)
+    # Load configuration
+    if config:
+        app_config = DocumenticConfig.load_from_file(config)
+    else:
+        app_config = DocumenticConfig()
+
+    # Override data directory if provided
+    if data_dir != Path("data"):
+        app_config.data_dir = str(data_dir)
+        app_config.raw_data_dir = str(data_dir / "raw")
+        app_config.lancedb.db_path = str(data_dir / "embeddings")
+        app_config.chat.conversation_dir = str(data_dir / "conversations")
+
+    # Set global config
+    set_config(app_config)
+
+    setup_logging(verbose or app_config.debug)
 
     # Store common options in context
     ctx.ensure_object(dict)
-    ctx.obj["config"] = config
+    ctx.obj["config"] = app_config
     ctx.obj["verbose"] = verbose
-    ctx.obj["data_dir"] = data_dir
+    ctx.obj["data_dir"] = Path(app_config.data_dir)
 
 
 @cli.command()
@@ -144,11 +160,14 @@ def index(
     force: bool,
 ) -> None:
     """Chunk and embed documents into the vector database."""
+    app_config = ctx.obj["config"]
     data_dir = ctx.obj["data_dir"]
 
     # Check for required API key
-    if not os.getenv("OPENAI_API_KEY"):
-        click.echo("❌ Error: OPENAI_API_KEY environment variable is required")
+    try:
+        app_config.get_openai_api_key()
+    except ValueError as e:
+        click.echo(f"❌ Error: {e}")
         sys.exit(1)
 
     click.echo("🔄 Starting document indexing...")
@@ -176,9 +195,14 @@ def index(
                 click.echo("❌ No chunks generated from manifest")
                 sys.exit(1)
 
-            # Create embedding pipeline and embed chunks
-            config = EmbeddingConfig(batch_size=batch_size)
-            pipeline = EmbeddingPipeline(config=config, db_path=data_dir / "embeddings")
+            # Create embedding pipeline and embed chunks using app config
+            # Override batch size if provided via CLI
+            if batch_size != 50:  # 50 is the default
+                app_config.embedding.batch_size = batch_size
+
+            # Create legacy config for compatibility
+            config = EmbeddingConfig(batch_size=app_config.embedding.batch_size)
+            pipeline = EmbeddingPipeline(config=config, db_path=Path(app_config.lancedb.db_path))
             bar.update(50)
 
             # Generate embeddings (this is async, so we need to run it properly)
@@ -230,25 +254,30 @@ def index(
 @click.pass_context
 def search(ctx: click.Context, query: str, limit: int, method: str) -> None:
     """Perform a one-off search query against the document index."""
-    data_dir = ctx.obj["data_dir"]
+    app_config = ctx.obj["config"]
 
     # Check for required API key
-    if not os.getenv("OPENAI_API_KEY"):
-        click.echo("❌ Error: OPENAI_API_KEY environment variable is required")
+    try:
+        app_config.get_openai_api_key()
+    except ValueError as e:
+        click.echo(f"❌ Error: {e}")
         sys.exit(1)
 
     try:
-        embedding_pipeline = EmbeddingPipeline(db_path=data_dir / "embeddings")
+        # Use config-based limit if not overridden
+        search_limit = min(limit, app_config.search.max_limit) if limit != 5 else app_config.search.default_limit
+
+        embedding_pipeline = EmbeddingPipeline(db_path=Path(app_config.lancedb.db_path))
         search_layer = SearchLayer(embedding_pipeline)
 
         click.echo(f"🔍 Searching for: {query}")
 
         if method == "vector":
-            results = search_layer.vector_search(query, limit=limit)
+            results = search_layer.vector_search(query, limit=search_limit)
         elif method == "fulltext":
-            results = search_layer.fulltext_search(query, limit=limit)
+            results = search_layer.fulltext_search(query, limit=search_limit)
         else:  # hybrid
-            results = search_layer.hybrid_search(query, limit=limit)
+            results = search_layer.hybrid_search(query, limit=search_limit)
 
         if not results:
             click.echo("No results found.")
@@ -283,18 +312,24 @@ def search(ctx: click.Context, query: str, limit: int, method: str) -> None:
 @click.pass_context
 def chat(ctx: click.Context, model: str, context_window: int) -> None:
     """Start an interactive chat session with the documentation."""
-    data_dir = ctx.obj["data_dir"]
+    app_config = ctx.obj["config"]
 
     # Check for required API key
-    if not os.getenv("OPENAI_API_KEY"):
-        click.echo("❌ Error: OPENAI_API_KEY environment variable is required")
+    try:
+        app_config.get_openai_api_key()
+    except ValueError as e:
+        click.echo(f"❌ Error: {e}")
         sys.exit(1)
 
     try:
-        embedding_pipeline = EmbeddingPipeline(db_path=data_dir / "embeddings")
+        # Override model if provided via CLI
+        if model != "gpt-4o-mini":
+            app_config.llm.model = model
+
+        embedding_pipeline = EmbeddingPipeline(db_path=Path(app_config.lancedb.db_path))
         search_layer = SearchLayer(embedding_pipeline)
         chat_config = ChatConfig(
-            model_name=model,
+            model_name=app_config.llm.model,
         )
         chat_interface = RAGChatInterface(search_layer, chat_config)
 
@@ -374,26 +409,39 @@ def evaluate(
     model: str,
 ) -> None:
     """Run quality evaluation checks on the system."""
+    app_config = ctx.obj["config"]
     data_dir = ctx.obj["data_dir"]
 
     # Check for required API key
-    if not os.getenv("OPENAI_API_KEY"):
-        click.echo("❌ Error: OPENAI_API_KEY environment variable is required")
+    try:
+        app_config.get_openai_api_key()
+    except ValueError as e:
+        click.echo(f"❌ Error: {e}")
         sys.exit(1)
 
     click.echo("🔬 Running quality evaluation...")
 
     try:
+        # Override evaluation config if CLI args provided
+        if questions_per_doc != 3:
+            app_config.evaluation.questions_per_doc = questions_per_doc
+        if max_documents != 10:
+            app_config.evaluation.max_documents = max_documents
+        if pass_threshold != 0.7:
+            app_config.evaluation.pass_threshold = pass_threshold
+        if model != "gpt-4o-mini":
+            app_config.llm.model = model
+
         # Initialize components
-        embedding_pipeline = EmbeddingPipeline(db_path=data_dir / "embeddings")
+        embedding_pipeline = EmbeddingPipeline(db_path=Path(app_config.lancedb.db_path))
         search_layer = SearchLayer(embedding_pipeline)
-        chat_config = ChatConfig(model_name=model)
+        chat_config = ChatConfig(model_name=app_config.llm.model)
         chat_interface = RAGChatInterface(search_layer, chat_config)
 
         # Create evaluation configuration
         eval_config = EvaluationConfig(
-            pass_threshold=pass_threshold,
-            evaluation_model=model
+            pass_threshold=app_config.evaluation.pass_threshold,
+            evaluation_model=app_config.llm.model
         )
 
         import asyncio
@@ -408,8 +456,8 @@ def evaluate(
             ) as bar:
                 dataset = await generate_evaluation_dataset(
                     search_layer,
-                    questions_per_doc=questions_per_doc,
-                    max_documents=max_documents
+                    questions_per_doc=app_config.evaluation.questions_per_doc,
+                    max_documents=app_config.evaluation.max_documents
                 )
                 bar.update(100)
 

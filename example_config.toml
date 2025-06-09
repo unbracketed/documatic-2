@@ -1,0 +1,57 @@
+# Example Documatic Configuration
+# This demonstrates the configuration system capabilities
+
+# Debug and logging settings
+debug = true
+log_level = "DEBUG"
+
+# Data directories
+data_dir = "custom_data"
+raw_data_dir = "custom_data/source"
+
+[llm]
+model = "gpt-4o-mini"
+temperature = 0.2
+max_tokens = 1500
+system_prompt = "You are an expert AppPack.io assistant. Provide detailed, accurate answers with proper citations."
+
+[embedding]
+model = "text-embedding-3-small"
+batch_size = 25
+max_retries = 5
+retry_delay = 2.0
+
+[lancedb]
+db_path = "custom_data/vectors"
+table_name = "apppack_docs"
+create_index = true
+index_metric = "cosine"
+nprobes = 30
+
+[chunking]
+chunk_size = 768
+chunk_overlap = 100
+max_chunk_size = 1536
+preserve_sections = true
+min_chunk_size = 150
+
+[search]
+default_limit = 8
+max_limit = 100
+vector_weight = 0.8
+fulltext_weight = 0.2
+rerank_enabled = true
+rerank_top_k = 15
+
+[chat]
+max_conversation_length = 100
+context_limit = 8
+stream_responses = true
+save_conversations = true
+conversation_dir = "custom_data/chats"
+
+[evaluation]
+questions_per_doc = 5
+max_documents = 20
+pass_threshold = 0.8
+metrics = ["mrr", "recall_at_5", "recall_at_10", "relevance", "citation_accuracy"]

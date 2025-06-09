@@ -19,6 +19,7 @@ from pydantic_ai import Agent
 from pydantic_ai.models.openai import OpenAIModel
 
 from .chunking import DocumentChunk
+from .config import get_config
 
 
 class RateLimitError(Exception):
@@ -82,11 +83,18 @@ class EmbeddingPipeline:
         self.db_path.mkdir(parents=True, exist_ok=True)
 
         # Initialize OpenAI model
+        # Try config first, then environment
         api_key = self.config.openai_api_key or os.getenv("OPENAI_API_KEY")
         if not api_key:
-            raise ValueError(
-                "OpenAI API key required. Set OPENAI_API_KEY environment variable."
-            )
+            # Try global config as fallback
+            try:
+                app_config = get_config()
+                api_key = app_config.get_openai_api_key()
+            except (ValueError, RuntimeError):
+                raise ValueError(
+                    "OpenAI API key required. Set OPENAI_API_KEY environment variable "
+                    "or configure it in the global config."
+                )
 
         self.model = OpenAIModel(self.config.model_name)
         self.agent = Agent(self.model)
@@ -334,16 +342,34 @@ class EmbeddingPipeline:
             index_type: Type of index to create (IVF_PQ, HNSW)
         """
         try:
+            # Get current document count
+            doc_count = len(self.table.to_pandas())
+
             if index_type == "IVF_PQ":
+                # Adjust num_partitions based on document count
+                # LanceDB requires num_partitions < number of vectors
+                # Use sqrt(n) as a reasonable heuristic, with min of 16
+                num_partitions = max(16, min(256, int(doc_count ** 0.5)))
+
+                # Only create index if we have enough documents
+                if doc_count < 16:
+                    print(
+                        f"Not enough documents ({doc_count}) to create vector index. "
+                        "Need at least 16."
+                    )
+                    return
+
                 # Create IVF_PQ index
                 self.table.create_index(
                     vector_column_name="vector",
                     index_type="IVF_PQ",
-                    num_partitions=256,
+                    num_partitions=num_partitions,
                     num_sub_vectors=96,
                     replace=True
                 )
-                print("Created IVF_PQ vector index")
+                print(
+                    f"Created IVF_PQ vector index with {num_partitions} partitions"
+                )
 
             elif index_type == "HNSW":
                 # Create HNSW index

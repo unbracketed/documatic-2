@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from pydantic_ai import Agent
 from pydantic_ai.models.openai import OpenAIModel
 
+from .config import get_config
 from .search import SearchLayer, SearchResult
 
 
@@ -112,9 +113,23 @@ class RAGChatInterface:
             conversation_context: Existing conversation context
         """
         self.search_layer = search_layer
-        self.config = config or ChatConfig()
+
+        # Use provided config or create one with app config defaults
+        if config:
+            self.config = config
+        else:
+            app_config = get_config()
+            self.config = ChatConfig(
+                model_name=app_config.llm.model,
+                max_sources=app_config.chat.context_limit,
+                temperature=app_config.llm.temperature,
+                max_tokens=app_config.llm.max_tokens,
+                stream_responses=app_config.chat.stream_responses
+            )
+
         self.context = conversation_context or ConversationContext(
-            conversation_id=f"chat_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            conversation_id=f"chat_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            context_window=self.config.max_sources
         )
 
         # Initialize Pydantic AI agent

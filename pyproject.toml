@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "pydantic-ai",
+    "pydantic-settings",
     "lancedb",
     "click",
     "httpx",
@@ -14,6 +15,7 @@ dependencies = [
     "pathlib",
     "pyarrow",
     "openai",
+    "tomli-w",
 ]
 
 [project.optional-dependencies]
